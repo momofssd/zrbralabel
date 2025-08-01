@@ -10,38 +10,43 @@
     <div class="container">
         <h1>Zebra Printer Label Viewer</h1>
         
-        <div class="tabs">
-            <button class="tab-button active" onclick="switchTab('zpl')">ZPL Code</button>
-            <button class="tab-button" onclick="switchTab('file')">Upload File</button>
-        </div>
+        <div class="main-grid">
+            <div class="input-section">
+                <div class="tabs">
+                    <button class="tab-button active" onclick="switchTab('zpl')">ZPL Code</button>
+                    <button class="tab-button" onclick="switchTab('file')">Upload File</button>
+                </div>
 
-        <div id="zplTab" class="tab-content active">
-            <textarea id="zplInput" placeholder="Enter ZPL code here...">^xa^pw812^ll608^cfa,50^fo100,100^fdHello World^fs^fo100,200^by3^bcn,100,y,n^fd123456789012^fs^xz</textarea>
-            <div class="button-group">
-                <button onclick="generateLabel()">Generate Label</button>
-                <button id="downloadButton" onclick="downloadLabel()" style="display: none;">Download PNG</button>
-                <button id="readBarcodesButton" onclick="readBarcodes()" style="display: none;">Read Barcodes</button>
-            </div>
-        </div>
+                <div id="zplTab" class="tab-content active">
+                    <textarea id="zplInput" placeholder="Enter ZPL code here...">^xa^pw812^ll608^cfa,50^fo100,100^fdHello World^fs^fo100,200^by3^bcn,100,y,n^fd123456789012^fs^xz</textarea>
+                    <div class="button-group">
+                        <button onclick="generateLabel()">Generate Label</button>
+                        <button id="downloadButton" onclick="downloadLabel()" style="display: none;">Download PNG</button>
+                        <button id="readBarcodesButton" onclick="readBarcodes()" style="display: none;">Read Barcodes</button>
+                    </div>
+                </div>
 
-        <div id="fileTab" class="tab-content">
-            <div class="file-upload">
-                <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg" onchange="handleFileUpload()">
-                <p class="file-info">Supported formats: PDF, PNG, JPG, JPEG</p>
+                <div id="fileTab" class="tab-content">
+                    <div class="file-upload">
+                        <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg" onchange="handleFileUpload()">
+                        <p class="file-info">Supported formats: PDF, PNG, JPG, JPEG</p>
+                    </div>
+                    <div class="button-group">
+                        <button id="readFileBarcodesButton" onclick="readFileBarcodesButton()" style="display: none;">Read Barcodes</button>
+                    </div>
+                </div>
+                <p id="errorMessage" class="error"></p>
             </div>
-            <div class="button-group">
-                <button id="readFileBarcodesButton" onclick="readFileBarcodesButton()" style="display: none;">Read Barcodes</button>
+
+            <div class="output-section">
+                <img id="labelImage" alt="Generated Label" style="display: none;">
+                
+                <div id="barcodeResults" class="barcode-results" style="display: none;">
+                    <h2>Barcode Reading Results</h2>
+                    <div id="barcodeList"></div>
+                    <p id="barcodeError" class="error"></p>
+                </div>
             </div>
-        </div>
-        <div id="output">
-            <img id="labelImage" alt="Generated Label" style="display: none;">
-            <p id="errorMessage" class="error"></p>
-        </div>
-        
-        <div id="barcodeResults" class="barcode-results" style="display: none;">
-            <h2>Barcode Reading Results</h2>
-            <div id="barcodeList"></div>
-            <p id="barcodeError" class="error"></p>
         </div>
     </div>
 

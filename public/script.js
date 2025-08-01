@@ -52,10 +52,12 @@ async function readFileBarcodesButton() {
     const barcodeResults = document.getElementById('barcodeResults');
     const barcodeList = document.getElementById('barcodeList');
     const barcodeError = document.getElementById('barcodeError');
+    const labelImage = document.getElementById('labelImage');
 
     // Clear previous results
     clearBarcodeResults();
     barcodeError.textContent = '';
+    labelImage.style.display = 'none';
 
     // Show loading state
     barcodeResults.style.display = 'block';
@@ -74,6 +76,12 @@ async function readFileBarcodesButton() {
 
         if (!response.ok) {
             throw new Error(data.error || `HTTP error! status: ${response.status}`);
+        }
+
+        // Display the image if available
+        if (data.image) {
+            labelImage.src = `data:image/png;base64,${data.image}`;
+            labelImage.style.display = 'block';
         }
 
         // Display results

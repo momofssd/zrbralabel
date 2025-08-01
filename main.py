@@ -13,6 +13,7 @@ import threading
 import pdf2image
 import os
 import tempfile
+import base64
 
 # Cache for storing generated labels
 label_cache = {}
@@ -211,21 +212,30 @@ def upload_file():
         
         all_barcodes = []
         
+        # Read file content once
+        file_content = file.read()
+        image_data = None
+
         if file_ext == '.pdf':
             # Create temporary directory for PDF processing
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Save PDF temporarily
                 pdf_path = os.path.join(temp_dir, 'temp.pdf')
-                file.save(pdf_path)
+                with open(pdf_path, 'wb') as f:
+                    f.write(file_content)
                 
                 # Convert PDF to images
                 images = pdf2image.convert_from_path(pdf_path)
                 
-                # Process each page
+                # Use first page for display
+                first_page = images[0]
+                img_byte_arr = io.BytesIO()
+                first_page.save(img_byte_arr, format='PNG')
+                image_data = img_byte_arr.getvalue()
+                
+                # Process each page for barcodes
                 for i, image in enumerate(images):
-                    # Convert PIL Image to OpenCV format
                     opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-                    
                     try:
                         page_barcodes = process_image_for_barcodes(opencv_image)
                         for barcode in page_barcodes:
@@ -234,25 +244,23 @@ def upload_file():
                     except Exception as e:
                         print(f"Error processing page {i+1}: {str(e)}")
                         continue
-                        
         else:  # Handle as image
             try:
-                # Read the image file
-                image_bytes = file.read()
-                barcodes = process_image_for_barcodes(image_bytes)
+                image_data = file_content
+                barcodes = process_image_for_barcodes(file_content)
                 all_barcodes.extend(barcodes)
             except Exception as e:
                 return jsonify({'error': f'Error processing image: {str(e)}'}), 500
 
-        if not all_barcodes:
-            return jsonify({
-                'message': 'No barcodes found in the file',
-                'barcodes': []
-            })
+        # Convert image to base64 for frontend display
+        image_base64 = None
+        if image_data:
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
 
         return jsonify({
             'message': f'Found {len(all_barcodes)} barcode(s)',
-            'barcodes': all_barcodes
+            'barcodes': all_barcodes,
+            'image': image_base64
         })
 
     except Exception as e:
