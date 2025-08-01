@@ -211,7 +211,7 @@ button:active {
     max-width: 90%;
     border: 1px solid #dee2e6;
     border-radius: 8px;
-    transform: rotate(90deg);
+    /* transform: rotate(90deg); */
     transform-origin: center;
     max-height: 500px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.1);
