@@ -10,6 +10,9 @@ from pylibdmtx import pylibdmtx
 import functools
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import threading
+import pdf2image
+import os
+import tempfile
 
 # Cache for storing generated labels
 label_cache = {}
@@ -54,6 +57,45 @@ def generate_label():
         return send_file(io.BytesIO(response.content), mimetype='image/png')
     else:
         return jsonify({'error': 'Error generating label'}), response.status_code
+
+def process_image_for_barcodes(image_data):
+    """Process image data and return barcodes found"""
+    # Convert image bytes to OpenCV format
+    if isinstance(image_data, (bytes, bytearray)):
+        nparr = np.frombuffer(image_data, np.uint8)
+        opencv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    else:
+        opencv_image = image_data
+
+    if opencv_image is None:
+        raise ValueError('Invalid image data')
+    
+    # Enhanced image preprocessing
+    gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+
+    barcode_data = []
+    
+    # Process barcodes in parallel with timeout
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        standard_future = executor.submit(process_standard_barcodes, gray)
+        pil_image = Image.fromarray(cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB))
+        matrix_future = executor.submit(process_datamatrix, pil_image)
+        
+        try:
+            standard_results = standard_future.result(timeout=2)
+            matrix_results = matrix_future.result(timeout=2)
+            
+            barcode_data.extend(standard_results)
+            barcode_data.extend(matrix_results)
+        except TimeoutError:
+            if standard_future.done():
+                barcode_data.extend(standard_future.result())
+            if matrix_future.done():
+                barcode_data.extend(matrix_future.result())
+    
+    return barcode_data
 
 def process_standard_barcodes(gray):
     try:
@@ -153,6 +195,68 @@ def read_barcodes():
 
     except Exception as e:
         return jsonify({'error': f'Error reading barcodes: {str(e)}'}), 500
+
+@app.route('/upload-file', methods=['POST'])
+def upload_file():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+
+        # Get file extension
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        
+        all_barcodes = []
+        
+        if file_ext == '.pdf':
+            # Create temporary directory for PDF processing
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Save PDF temporarily
+                pdf_path = os.path.join(temp_dir, 'temp.pdf')
+                file.save(pdf_path)
+                
+                # Convert PDF to images
+                images = pdf2image.convert_from_path(pdf_path)
+                
+                # Process each page
+                for i, image in enumerate(images):
+                    # Convert PIL Image to OpenCV format
+                    opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                    
+                    try:
+                        page_barcodes = process_image_for_barcodes(opencv_image)
+                        for barcode in page_barcodes:
+                            barcode['page'] = i + 1
+                        all_barcodes.extend(page_barcodes)
+                    except Exception as e:
+                        print(f"Error processing page {i+1}: {str(e)}")
+                        continue
+                        
+        else:  # Handle as image
+            try:
+                # Read the image file
+                image_bytes = file.read()
+                barcodes = process_image_for_barcodes(image_bytes)
+                all_barcodes.extend(barcodes)
+            except Exception as e:
+                return jsonify({'error': f'Error processing image: {str(e)}'}), 500
+
+        if not all_barcodes:
+            return jsonify({
+                'message': 'No barcodes found in the file',
+                'barcodes': []
+            })
+
+        return jsonify({
+            'message': f'Found {len(all_barcodes)} barcode(s)',
+            'barcodes': all_barcodes
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error processing file: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(port=3000, debug=True)

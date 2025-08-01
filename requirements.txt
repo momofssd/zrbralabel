@@ -6,3 +6,5 @@ opencv-python>=4.5.0
 pyzbar>=0.1.8
 numpy>=1.19.0
 pylibdmtx>=0.1.9
+pdf2image>=1.16.0
+poppler-utils>=0.1.0  # Required by pdf2image

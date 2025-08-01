@@ -3,6 +3,53 @@ body {
     margin: 20px;
     max-width: 800px;
     margin: 0 auto;
+    padding: 20px;
+}
+.tabs {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+.tab-button {
+    padding: 10px 20px;
+    background-color: #e9ecef;
+    color: #495057;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+}
+.tab-button.active {
+    background-color: #007bff;
+    color: white;
+    border-color: #007bff;
+}
+.tab-button:hover:not(.active) {
+    background-color: #dee2e6;
+}
+.tab-content {
+    display: none;
+    margin-bottom: 20px;
+}
+.tab-content.active {
+    display: block;
+}
+.file-upload {
+    border: 2px dashed #dee2e6;
+    padding: 20px;
+    text-align: center;
+    border-radius: 4px;
+    margin-bottom: 20px;
+}
+.file-upload input[type="file"] {
+    width: 100%;
+    max-width: 400px;
+    margin-bottom: 10px;
+}
+.file-info {
+    color: #6c757d;
+    margin: 10px 0;
+    font-size: 14px;
 }
 .container {
     display: flex;
@@ -46,4 +93,64 @@ button:hover {
 .error {
     color: red;
     font-size: 14px;
+}
+
+.barcode-page {
+    background-color: #e9ecef;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    margin-left: 10px;
+}
+
+.loading {
+    text-align: center;
+    color: #6c757d;
+    padding: 20px;
+    font-style: italic;
+}
+
+.barcode-item {
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 15px;
+    margin-bottom: 10px;
+    background-color: #f8f9fa;
+}
+
+.barcode-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.barcode-type {
+    background-color: #007bff;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    margin-left: 10px;
+}
+
+.barcode-data {
+    font-family: monospace;
+    background-color: white;
+    padding: 10px;
+    border-radius: 3px;
+    margin-bottom: 10px;
+    word-break: break-all;
+}
+
+.barcode-location {
+    color: #6c757d;
+    font-size: 14px;
+}
+
+.no-barcodes {
+    text-align: center;
+    color: #6c757d;
+    padding: 20px;
+    border: 1px dashed #dee2e6;
+    border-radius: 4px;
 }
