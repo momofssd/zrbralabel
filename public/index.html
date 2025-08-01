@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zebra Printer Label Viewer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Zebra Printer Label Viewer</h1>
+        <textarea id="zplInput" placeholder="Enter ZPL code here...">^xa^pw812^ll608^cfa,50^fo100,100^fdHello World^fs^xz</textarea>
+        <div class="button-group">
+            <button onclick="generateLabel()">Generate Label</button>
+            <button id="downloadButton" onclick="downloadLabel()" style="display: none;">Download PNG</button>
+        </div>
+        <div id="output">
+            <img id="labelImage" alt="Generated Label" style="display: none;">
+            <p id="errorMessage" class="error"></p>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
