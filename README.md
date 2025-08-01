@@ -82,7 +82,7 @@ A powerful web application that can **read labels**, automatically **find barcod
 
 - `FLASK_APP`: Set to main.py
 - `FLASK_ENV`: Set to production in container
-- `PORT`: Default is 3000
+- `PORT`: Default is 5000
 
 ## System Requirements
 
