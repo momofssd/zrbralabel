@@ -1,7 +1,8 @@
-flask
-flask-cors
-requests
-pillow
-opencv-python
-pyzbar
-numpy
+Flask>=2.0.0
+Flask-CORS>=3.0.0
+requests>=2.25.0
+Pillow>=9.0.0
+opencv-python>=4.5.0
+pyzbar>=0.1.8
+numpy>=1.19.0
+pylibdmtx>=0.1.9
