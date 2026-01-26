@@ -17,6 +17,9 @@ import base64
 import hashlib
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+import time
+import threading
+
 
 # --- Configuration & Persistent Cache Setup ---
 CACHE_DIR = "label_storage_cache"
@@ -244,22 +247,62 @@ def read_barcodes_from_image():
 def generate_pdf_from_labels():
     try:
         labels = request.json.get('labels', [])
+        if not labels:
+            return jsonify({'error': 'No labels provided'}), 400
+
         from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import letter
         from reportlab.lib.utils import ImageReader
+        
+        # Define 4x6 inches in points (1 inch = 72 points)
+        LABEL_WIDTH = 4 * 72   # 288 points
+        LABEL_HEIGHT = 6 * 72  # 432 points
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
             pdf_path = tmp_file.name
-            c = canvas.Canvas(pdf_path, pagesize=letter)
+            # Create the canvas with the specific 4x6 page size
+            c = canvas.Canvas(pdf_path, pagesize=(LABEL_WIDTH, LABEL_HEIGHT))
+            
             for label in labels:
                 img_data = base64.b64decode(label['image'])
-                img_reader = ImageReader(io.BytesIO(img_data))
-                c.drawImage(img_reader, 50, 250, width=500, height=350)
+                img_io = io.BytesIO(img_data)
+                img_reader = ImageReader(img_io)
+                
+                # Get original image dimensions
+                orig_w, orig_h = img_reader.getSize()
+                aspect = orig_h / float(orig_w)
+                
+                # Calculate scaling to fit 4x6 while maintaining aspect ratio
+                # We leave a tiny margin (e.g., 4 points) to prevent clipping
+                margin = 4
+                printable_w = LABEL_WIDTH - (margin * 2)
+                printable_h = LABEL_HEIGHT - (margin * 2)
+                
+                draw_w = printable_w
+                draw_h = draw_w * aspect
+                
+                # If the height exceeds the page, scale down based on height instead
+                if draw_h > printable_h:
+                    draw_h = printable_h
+                    draw_w = draw_h / aspect
+                
+                # Center the image on the 4x6 page
+                x_centered = (LABEL_WIDTH - draw_w) / 2
+                y_centered = (LABEL_HEIGHT - draw_h) / 2
+                
+                c.drawImage(img_reader, x_centered, y_centered, width=draw_w, height=draw_h)
                 c.showPage()
+                
             c.save()
         
-        return send_file(pdf_path, mimetype='application/pdf', as_attachment=True, download_name='labels.pdf')
-    except Exception as e: return jsonify({'error': str(e)}), 500
+        return send_file(
+            pdf_path, 
+            mimetype='application/pdf', 
+            as_attachment=True, 
+            download_name='zebra_labels_4x6.pdf'
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
