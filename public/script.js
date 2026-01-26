@@ -493,3 +493,46 @@ async function downloadAllLabels() {
     downloadButton.textContent = "Download All as PDF";
   }
 }
+
+async function resetCache() {
+  const errorMessage = document.getElementById("errorMessage");
+  const resetButton = document.getElementById("resetCacheButton");
+
+  // Confirm action with user
+  if (
+    !confirm(
+      "Are you sure you want to clear the label cache? This will delete all cached label images.",
+    )
+  ) {
+    return;
+  }
+
+  // Show loading state
+  resetButton.disabled = true;
+  resetButton.textContent = "Clearing...";
+  errorMessage.textContent = "";
+
+  try {
+    const response = await fetch("/reset-cache", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP error! status: ${response.status}`);
+    }
+
+    // Show success message
+    errorMessage.textContent = "";
+    alert(data.message);
+  } catch (error) {
+    errorMessage.textContent = `Error clearing cache: ${error.message}`;
+  } finally {
+    resetButton.disabled = false;
+    resetButton.textContent = "Reset Cache";
+  }
+}

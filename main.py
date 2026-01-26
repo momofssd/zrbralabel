@@ -302,6 +302,33 @@ def generate_pdf_from_labels():
         )
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/reset-cache', methods=['POST'])
+def reset_cache():
+    """Delete all files in the label_storage_cache directory"""
+    try:
+        import shutil
+        deleted_count = 0
+        
+        if os.path.exists(CACHE_DIR):
+            # Delete all files in the cache directory
+            for filename in os.listdir(CACHE_DIR):
+                file_path = os.path.join(CACHE_DIR, filename)
+                try:
+                    if os.path.isfile(file_path):
+                        os.unlink(file_path)
+                        deleted_count += 1
+                except Exception as e:
+                    print(f"Error deleting {file_path}: {e}")
+            
+            return jsonify({
+                'message': f'Cache cleared successfully. Deleted {deleted_count} file(s).',
+                'deleted_count': deleted_count
+            })
+        else:
+            return jsonify({'message': 'Cache directory does not exist.', 'deleted_count': 0})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     
 
 if __name__ == '__main__':

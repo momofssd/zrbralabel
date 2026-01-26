@@ -342,3 +342,18 @@ button:active {
   min-width: 120px;
   text-align: center;
 }
+
+.reset-cache-button {
+  background-color: #dc3545;
+  margin-left: auto;
+}
+
+.reset-cache-button:hover {
+  background-color: #c82333;
+}
+
+.reset-cache-button:disabled {
+  background-color: #6c757d;
+  cursor: not-allowed;
+  opacity: 0.5;
+}
