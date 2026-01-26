@@ -266,5 +266,200 @@ def upload_file():
     except Exception as e:
         return jsonify({'error': f'Error processing file: {str(e)}'}), 500
 
+@app.route('/extract-zpl-from-pdf', methods=['POST'])
+def extract_zpl_from_pdf():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+
+        # Get file extension
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        
+        if file_ext != '.pdf':
+            return jsonify({'error': 'Only PDF files are supported'}), 400
+        
+        # Read file content
+        file_content = file.read()
+        
+        labels = []
+        
+        # Create temporary directory for PDF processing
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Save PDF temporarily
+            pdf_path = os.path.join(temp_dir, 'temp.pdf')
+            with open(pdf_path, 'wb') as f:
+                f.write(file_content)
+            
+            # Convert PDF to images (each page contains ZPL code as text/image)
+            images = pdf2image.convert_from_path(pdf_path, dpi=300)
+            
+            # Try to extract text from PDF using PyPDF2 or pdfplumber
+            try:
+                import PyPDF2
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+                
+                for page_num, page in enumerate(pdf_reader.pages):
+                    text = page.extract_text()
+                    
+                    # Look for ZPL code patterns (starts with ^XA and ends with ^XZ)
+                    if '^XA' in text.upper() or '^xa' in text:
+                        # Extract ZPL code
+                        zpl_code = text.strip()
+                        
+                        # Generate label image from ZPL
+                        headers = {'Accept': 'image/png'}
+                        response = requests.post(
+                            'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
+                            data=zpl_code,
+                            headers=headers,
+                            timeout=10
+                        )
+                        
+                        if response.status_code == 200:
+                            # Convert to base64
+                            image_base64 = base64.b64encode(response.content).decode('utf-8')
+                            labels.append({
+                                'page': page_num + 1,
+                                'zpl': zpl_code,
+                                'image': image_base64
+                            })
+            except ImportError:
+                # Fallback: Try OCR on images if PyPDF2 is not available
+                try:
+                    import pytesseract
+                    for page_num, image in enumerate(images):
+                        text = pytesseract.image_to_string(image)
+                        
+                        if '^XA' in text.upper() or '^xa' in text:
+                            zpl_code = text.strip()
+                            
+                            # Generate label image from ZPL
+                            headers = {'Accept': 'image/png'}
+                            response = requests.post(
+                                'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
+                                data=zpl_code,
+                                headers=headers,
+                                timeout=10
+                            )
+                            
+                            if response.status_code == 200:
+                                image_base64 = base64.b64encode(response.content).decode('utf-8')
+                                labels.append({
+                                    'page': page_num + 1,
+                                    'zpl': zpl_code,
+                                    'image': image_base64
+                                })
+                except ImportError:
+                    return jsonify({'error': 'PDF text extraction libraries not available. Please install PyPDF2 or pytesseract.'}), 500
+        
+        if not labels:
+            return jsonify({'error': 'No ZPL codes found in the PDF'}), 400
+        
+        return jsonify({
+            'message': f'Extracted {len(labels)} label(s)',
+            'labels': labels
+        })
+
+    except Exception as e:
+        return jsonify({'error': f'Error extracting ZPL from PDF: {str(e)}'}), 500
+
+@app.route('/read-barcodes-from-image', methods=['POST'])
+def read_barcodes_from_image():
+    try:
+        data = request.json
+        if not data or 'image' not in data:
+            return jsonify({'error': 'Image data is required'}), 400
+        
+        # Decode base64 image
+        image_data = base64.b64decode(data['image'])
+        
+        # Process image for barcodes
+        barcodes = process_image_for_barcodes(image_data)
+        
+        return jsonify({
+            'message': f'Found {len(barcodes)} barcode(s)',
+            'barcodes': barcodes
+        })
+    
+    except Exception as e:
+        return jsonify({'error': f'Error reading barcodes: {str(e)}'}), 500
+
+@app.route('/generate-pdf-from-labels', methods=['POST'])
+def generate_pdf_from_labels():
+    try:
+        data = request.json
+        if not data or 'labels' not in data:
+            return jsonify({'error': 'Labels data is required'}), 400
+        
+        labels = data['labels']
+        
+        if not labels or len(labels) == 0:
+            return jsonify({'error': 'No labels provided'}), 400
+        
+        # Create PDF from images
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.utils import ImageReader
+        
+        # Create temporary file for PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            pdf_path = tmp_file.name
+            
+            c = canvas.Canvas(pdf_path, pagesize=letter)
+            page_width, page_height = letter
+            
+            for label in labels:
+                # Decode base64 image
+                image_data = base64.b64decode(label['image'])
+                image = Image.open(io.BytesIO(image_data))
+                
+                # Calculate dimensions to fit on page
+                img_width, img_height = image.size
+                aspect = img_height / img_width
+                
+                # Scale to fit page with margins
+                max_width = page_width - 100
+                max_height = page_height - 100
+                
+                if img_width > max_width:
+                    img_width = max_width
+                    img_height = img_width * aspect
+                
+                if img_height > max_height:
+                    img_height = max_height
+                    img_width = img_height / aspect
+                
+                # Center image on page
+                x = (page_width - img_width) / 2
+                y = (page_height - img_height) / 2
+                
+                # Draw image
+                img_reader = ImageReader(io.BytesIO(image_data))
+                c.drawImage(img_reader, x, y, width=img_width, height=img_height)
+                c.showPage()
+            
+            c.save()
+        
+        # Read PDF and return
+        with open(pdf_path, 'rb') as f:
+            pdf_data = f.read()
+        
+        # Clean up temporary file
+        os.unlink(pdf_path)
+        
+        return send_file(
+            io.BytesIO(pdf_data),
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name='zebra_labels.pdf'
+        )
+    
+    except Exception as e:
+        return jsonify({'error': f'Error generating PDF: {str(e)}'}), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
