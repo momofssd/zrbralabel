@@ -14,28 +14,49 @@ import pdf2image
 import os
 import tempfile
 import base64
+import hashlib
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
-# Cache for storing generated labels
-label_cache = {}
-cache_lock = threading.Lock()
-
-def cache_label(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        zpl = request.json.get('zpl')
-        with cache_lock:
-            if zpl in label_cache:
-                return label_cache[zpl]
-            result = func(*args, **kwargs)
-            label_cache[zpl] = result
-            # Keep cache size reasonable
-            if len(label_cache) > 100:
-                label_cache.pop(next(iter(label_cache)))
-            return result
-    return wrapper
+# --- Configuration & Persistent Cache Setup ---
+CACHE_DIR = "label_storage_cache"
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
 
 app = Flask(__name__, static_folder='public', static_url_path='', template_folder='public')
 CORS(app)
+
+# --- Resilient Session (Handles the 429 "Too Many Requests" Burst Limit) ---
+session = requests.Session()
+retries = Retry(
+    total=3,
+    backoff_factor=1,  # Waits 1s, 2s, 4s between retries
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["POST"]
+)
+session.mount('http://', HTTPAdapter(max_retries=retries))
+session.mount('https://', HTTPAdapter(max_retries=retries))
+
+# --- Cache Helper Functions ---
+def get_zpl_hash(zpl):
+    """Creates a unique MD5 hash for the ZPL string to use as a filename."""
+    return hashlib.md5(zpl.encode('utf-8')).hexdigest()
+
+def get_cached_label(zpl_hash):
+    """Returns the binary image data if it exists on disk."""
+    cache_path = os.path.join(CACHE_DIR, f"{zpl_hash}.png")
+    if os.path.exists(cache_path):
+        with open(cache_path, 'rb') as f:
+            return f.read()
+    return None
+
+def save_to_cache(zpl_hash, content):
+    """Saves the binary label image to disk."""
+    cache_path = os.path.join(CACHE_DIR, f"{zpl_hash}.png")
+    with open(cache_path, 'wb') as f:
+        f.write(content)
+
+# --- Routes ---
 
 @app.route('/')
 def index():
@@ -47,21 +68,32 @@ def generate_label():
     if not zpl:
         return jsonify({'error': 'ZPL code is required'}), 400
 
-    headers = {'Accept': 'image/png'}
-    response = requests.post(
-        'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
-        data=zpl,
-        headers=headers
-    )
+    zpl_hash = get_zpl_hash(zpl)
+    
+    # Check disk cache first to save API quota
+    cached_data = get_cached_label(zpl_hash)
+    if cached_data:
+        return send_file(io.BytesIO(cached_data), mimetype='image/png')
 
-    if response.status_code == 200:
-        return send_file(io.BytesIO(response.content), mimetype='image/png')
-    else:
-        return jsonify({'error': 'Error generating label'}), response.status_code
+    try:
+        headers = {'Accept': 'image/png'}
+        response = session.post(
+            'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
+            data=zpl,
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            save_to_cache(zpl_hash, response.content)
+            return send_file(io.BytesIO(response.content), mimetype='image/png')
+        else:
+            return jsonify({'error': f'Labelary Error: {response.text}'}), response.status_code
+    except Exception as e:
+        return jsonify({'error': f'Connection error: {str(e)}'}), 500
 
 def process_image_for_barcodes(image_data):
     """Process image data and return barcodes found"""
-    # Convert image bytes to OpenCV format
     if isinstance(image_data, (bytes, bytearray)):
         nparr = np.frombuffer(image_data, np.uint8)
         opencv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -71,30 +103,23 @@ def process_image_for_barcodes(image_data):
     if opencv_image is None:
         raise ValueError('Invalid image data')
     
-    # Enhanced image preprocessing
     gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
 
     barcode_data = []
     
-    # Process barcodes in parallel with timeout
     with ThreadPoolExecutor(max_workers=2) as executor:
         standard_future = executor.submit(process_standard_barcodes, gray)
         pil_image = Image.fromarray(cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB))
         matrix_future = executor.submit(process_datamatrix, pil_image)
         
         try:
-            standard_results = standard_future.result(timeout=2)
-            matrix_results = matrix_future.result(timeout=2)
-            
-            barcode_data.extend(standard_results)
-            barcode_data.extend(matrix_results)
+            barcode_data.extend(standard_future.result(timeout=2))
+            barcode_data.extend(matrix_future.result(timeout=2))
         except TimeoutError:
-            if standard_future.done():
-                barcode_data.extend(standard_future.result())
-            if matrix_future.done():
-                barcode_data.extend(matrix_future.result())
+            if standard_future.done(): barcode_data.extend(standard_future.result())
+            if matrix_future.done(): barcode_data.extend(matrix_future.result())
     
     return barcode_data
 
@@ -104,362 +129,137 @@ def process_standard_barcodes(gray):
         return [{
             'data': barcode.data.decode('utf-8'),
             'type': barcode.type,
-            'location': {
-                'x': barcode.rect[0],
-                'y': barcode.rect[1],
-                'width': barcode.rect[2],
-                'height': barcode.rect[3]
-            }
+            'location': {'x': barcode.rect[0], 'y': barcode.rect[1], 'width': barcode.rect[2], 'height': barcode.rect[3]}
         } for barcode in barcodes]
-    except Exception:
-        return []
+    except Exception: return []
 
 def process_datamatrix(pil_image):
     try:
-        dmtx_results = pylibdmtx.decode(pil_image, timeout=1000)  # 1 second timeout
+        dmtx_results = pylibdmtx.decode(pil_image, timeout=1000)
         return [{
             'data': code.data.decode('utf-8'),
             'type': 'DataMatrix',
-            'location': {
-                'x': code.rect[0],
-                'y': code.rect[1],
-                'width': code.rect[2],
-                'height': code.rect[3]
-            }
+            'location': {'x': code.rect[0], 'y': code.rect[1], 'width': code.rect[2], 'height': code.rect[3]}
         } for code in dmtx_results]
-    except Exception:
-        return []
+    except Exception: return []
 
 @app.route('/read-barcodes', methods=['POST'])
-@cache_label
 def read_barcodes():
     try:
         zpl = request.json.get('zpl')
         if not zpl:
             return jsonify({'error': 'ZPL code is required'}), 400
 
-        headers = {'Accept': 'image/png'}
-        response = requests.post(
-            'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
-            data=zpl,
-            headers=headers,
-            timeout=5  # 5 second timeout for API request
-        )
+        zpl_hash = get_zpl_hash(zpl)
+        label_content = get_cached_label(zpl_hash)
 
-        if response.status_code != 200:
-            return jsonify({'error': 'Error generating label for barcode reading'}), response.status_code
+        if not label_content:
+            response = session.post(
+                'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
+                data=zpl, headers={'Accept': 'image/png'}, timeout=10
+            )
+            if response.status_code != 200:
+                return jsonify({'error': 'Error generating label'}), response.status_code
+            label_content = response.content
+            save_to_cache(zpl_hash, label_content)
 
-        # Convert image bytes directly to OpenCV format
-        nparr = np.frombuffer(response.content, np.uint8)
-        opencv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if opencv_image is None:
-            return jsonify({'error': 'Invalid image data'}), 400
-        
-        # Enhanced image preprocessing
-        gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)  # Reduced blur kernel size
-        gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-
-        barcode_data = []
-        
-        # Process barcodes in parallel with timeout
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Start both tasks
-            standard_future = executor.submit(process_standard_barcodes, gray)
-            pil_image = Image.fromarray(cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB))
-            matrix_future = executor.submit(process_datamatrix, pil_image)
-            
-            try:
-                # Get results with timeout
-                standard_results = standard_future.result(timeout=2)  # 2 second timeout
-                matrix_results = matrix_future.result(timeout=2)  # 2 second timeout
-                
-                barcode_data.extend(standard_results)
-                barcode_data.extend(matrix_results)
-            except TimeoutError:
-                # If timeout occurs, use whatever results we have
-                if standard_future.done():
-                    barcode_data.extend(standard_future.result())
-                if matrix_future.done():
-                    barcode_data.extend(matrix_future.result())
-
-        if not barcode_data:
-            return jsonify({
-                'message': 'No barcodes found in the label',
-                'barcodes': []
-            })
-
-        return jsonify({
-            'message': f'Found {len(barcode_data)} barcode(s)',
-            'barcodes': barcode_data
-        })
-
+        barcode_data = process_image_for_barcodes(label_content)
+        return jsonify({'message': f'Found {len(barcode_data)} barcode(s)', 'barcodes': barcode_data})
     except Exception as e:
-        return jsonify({'error': f'Error reading barcodes: {str(e)}'}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/upload-file', methods=['POST'])
 def upload_file():
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-            
+        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
         file = request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-
-        # Get file extension
         file_ext = os.path.splitext(file.filename)[1].lower()
-        
-        all_barcodes = []
-        
-        # Read file content once
         file_content = file.read()
+        all_barcodes = []
         image_data = None
 
         if file_ext == '.pdf':
-            # Create temporary directory for PDF processing
             with tempfile.TemporaryDirectory() as temp_dir:
-                # Save PDF temporarily
                 pdf_path = os.path.join(temp_dir, 'temp.pdf')
-                with open(pdf_path, 'wb') as f:
-                    f.write(file_content)
-                
-                # Convert PDF to images
+                with open(pdf_path, 'wb') as f: f.write(file_content)
                 images = pdf2image.convert_from_path(pdf_path)
-                
-                # Use first page for display
                 first_page = images[0]
                 img_byte_arr = io.BytesIO()
                 first_page.save(img_byte_arr, format='PNG')
                 image_data = img_byte_arr.getvalue()
                 
-                # Process each page for barcodes
                 for i, image in enumerate(images):
                     opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-                    try:
-                        page_barcodes = process_image_for_barcodes(opencv_image)
-                        for barcode in page_barcodes:
-                            barcode['page'] = i + 1
-                        all_barcodes.extend(page_barcodes)
-                    except Exception as e:
-                        print(f"Error processing page {i+1}: {str(e)}")
-                        continue
-        else:  # Handle as image
-            try:
-                image_data = file_content
-                barcodes = process_image_for_barcodes(file_content)
-                all_barcodes.extend(barcodes)
-            except Exception as e:
-                return jsonify({'error': f'Error processing image: {str(e)}'}), 500
+                    page_barcodes = process_image_for_barcodes(opencv_image)
+                    for b in page_barcodes: b['page'] = i + 1
+                    all_barcodes.extend(page_barcodes)
+        else:
+            image_data = file_content
+            all_barcodes.extend(process_image_for_barcodes(file_content))
 
-        # Convert image to base64 for frontend display
-        image_base64 = None
-        if image_data:
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
-
-        return jsonify({
-            'message': f'Found {len(all_barcodes)} barcode(s)',
-            'barcodes': all_barcodes,
-            'image': image_base64
-        })
-
-    except Exception as e:
-        return jsonify({'error': f'Error processing file: {str(e)}'}), 500
+        image_base64 = base64.b64encode(image_data).decode('utf-8') if image_data else None
+        return jsonify({'barcodes': all_barcodes, 'image': image_base64})
+    except Exception as e: return jsonify({'error': str(e)}), 500
 
 @app.route('/extract-zpl-from-pdf', methods=['POST'])
 def extract_zpl_from_pdf():
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-            
+        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
         file = request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-
-        # Get file extension
-        file_ext = os.path.splitext(file.filename)[1].lower()
-        
-        if file_ext != '.pdf':
-            return jsonify({'error': 'Only PDF files are supported'}), 400
-        
-        # Read file content
         file_content = file.read()
-        
         labels = []
         
-        # Create temporary directory for PDF processing
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Save PDF temporarily
-            pdf_path = os.path.join(temp_dir, 'temp.pdf')
-            with open(pdf_path, 'wb') as f:
-                f.write(file_content)
-            
-            # Convert PDF to images (each page contains ZPL code as text/image)
-            images = pdf2image.convert_from_path(pdf_path, dpi=300)
-            
-            # Try to extract text from PDF using PyPDF2 or pdfplumber
-            try:
-                import PyPDF2
-                pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+        import PyPDF2
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+        for page_num, page in enumerate(pdf_reader.pages):
+            text = page.extract_text()
+            if '^XA' in text.upper():
+                zpl_code = text.strip()
+                zpl_hash = get_zpl_hash(zpl_code)
+                img_data = get_cached_label(zpl_hash)
                 
-                for page_num, page in enumerate(pdf_reader.pages):
-                    text = page.extract_text()
-                    
-                    # Look for ZPL code patterns (starts with ^XA and ends with ^XZ)
-                    if '^XA' in text.upper() or '^xa' in text:
-                        # Extract ZPL code
-                        zpl_code = text.strip()
-                        
-                        # Generate label image from ZPL
-                        headers = {'Accept': 'image/png'}
-                        response = requests.post(
-                            'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
-                            data=zpl_code,
-                            headers=headers,
-                            timeout=10
-                        )
-                        
-                        if response.status_code == 200:
-                            # Convert to base64
-                            image_base64 = base64.b64encode(response.content).decode('utf-8')
-                            labels.append({
-                                'page': page_num + 1,
-                                'zpl': zpl_code,
-                                'image': image_base64
-                            })
-            except ImportError:
-                # Fallback: Try OCR on images if PyPDF2 is not available
-                try:
-                    import pytesseract
-                    for page_num, image in enumerate(images):
-                        text = pytesseract.image_to_string(image)
-                        
-                        if '^XA' in text.upper() or '^xa' in text:
-                            zpl_code = text.strip()
-                            
-                            # Generate label image from ZPL
-                            headers = {'Accept': 'image/png'}
-                            response = requests.post(
-                                'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
-                                data=zpl_code,
-                                headers=headers,
-                                timeout=10
-                            )
-                            
-                            if response.status_code == 200:
-                                image_base64 = base64.b64encode(response.content).decode('utf-8')
-                                labels.append({
-                                    'page': page_num + 1,
-                                    'zpl': zpl_code,
-                                    'image': image_base64
-                                })
-                except ImportError:
-                    return jsonify({'error': 'PDF text extraction libraries not available. Please install PyPDF2 or pytesseract.'}), 500
+                if not img_data:
+                    resp = session.post('http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/', 
+                                      data=zpl_code, headers={'Accept': 'image/png'})
+                    if resp.status_code == 200:
+                        img_data = resp.content
+                        save_to_cache(zpl_hash, img_data)
+                
+                if img_data:
+                    labels.append({'page': page_num + 1, 'zpl': zpl_code, 'image': base64.b64encode(img_data).decode('utf-8')})
         
-        if not labels:
-            return jsonify({'error': 'No ZPL codes found in the PDF'}), 400
-        
-        return jsonify({
-            'message': f'Extracted {len(labels)} label(s)',
-            'labels': labels
-        })
-
-    except Exception as e:
-        return jsonify({'error': f'Error extracting ZPL from PDF: {str(e)}'}), 500
+        return jsonify({'labels': labels})
+    except Exception as e: return jsonify({'error': str(e)}), 500
 
 @app.route('/read-barcodes-from-image', methods=['POST'])
 def read_barcodes_from_image():
     try:
         data = request.json
-        if not data or 'image' not in data:
-            return jsonify({'error': 'Image data is required'}), 400
-        
-        # Decode base64 image
         image_data = base64.b64decode(data['image'])
-        
-        # Process image for barcodes
         barcodes = process_image_for_barcodes(image_data)
-        
-        return jsonify({
-            'message': f'Found {len(barcodes)} barcode(s)',
-            'barcodes': barcodes
-        })
-    
-    except Exception as e:
-        return jsonify({'error': f'Error reading barcodes: {str(e)}'}), 500
+        return jsonify({'barcodes': barcodes})
+    except Exception as e: return jsonify({'error': str(e)}), 500
 
 @app.route('/generate-pdf-from-labels', methods=['POST'])
 def generate_pdf_from_labels():
     try:
-        data = request.json
-        if not data or 'labels' not in data:
-            return jsonify({'error': 'Labels data is required'}), 400
-        
-        labels = data['labels']
-        
-        if not labels or len(labels) == 0:
-            return jsonify({'error': 'No labels provided'}), 400
-        
-        # Create PDF from images
+        labels = request.json.get('labels', [])
         from reportlab.pdfgen import canvas
         from reportlab.lib.pagesizes import letter
         from reportlab.lib.utils import ImageReader
         
-        # Create temporary file for PDF
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
             pdf_path = tmp_file.name
-            
             c = canvas.Canvas(pdf_path, pagesize=letter)
-            page_width, page_height = letter
-            
             for label in labels:
-                # Decode base64 image
-                image_data = base64.b64decode(label['image'])
-                image = Image.open(io.BytesIO(image_data))
-                
-                # Calculate dimensions to fit on page
-                img_width, img_height = image.size
-                aspect = img_height / img_width
-                
-                # Scale to fit page with margins
-                max_width = page_width - 100
-                max_height = page_height - 100
-                
-                if img_width > max_width:
-                    img_width = max_width
-                    img_height = img_width * aspect
-                
-                if img_height > max_height:
-                    img_height = max_height
-                    img_width = img_height / aspect
-                
-                # Center image on page
-                x = (page_width - img_width) / 2
-                y = (page_height - img_height) / 2
-                
-                # Draw image
-                img_reader = ImageReader(io.BytesIO(image_data))
-                c.drawImage(img_reader, x, y, width=img_width, height=img_height)
+                img_data = base64.b64decode(label['image'])
+                img_reader = ImageReader(io.BytesIO(img_data))
+                c.drawImage(img_reader, 50, 250, width=500, height=350)
                 c.showPage()
-            
             c.save()
         
-        # Read PDF and return
-        with open(pdf_path, 'rb') as f:
-            pdf_data = f.read()
-        
-        # Clean up temporary file
-        os.unlink(pdf_path)
-        
-        return send_file(
-            io.BytesIO(pdf_data),
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name='zebra_labels.pdf'
-        )
-    
-    except Exception as e:
-        return jsonify({'error': f'Error generating PDF: {str(e)}'}), 500
+        return send_file(pdf_path, mimetype='application/pdf', as_attachment=True, download_name='labels.pdf')
+    except Exception as e: return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
