@@ -106,45 +106,102 @@ def process_image_for_barcodes(image_data):
     if opencv_image is None:
         raise ValueError('Invalid image data')
     
+    # Convert to grayscale
     gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-
+    
     barcode_data = []
     
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        standard_future = executor.submit(process_standard_barcodes, gray)
-        pil_image = Image.fromarray(cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB))
+    # Try multiple preprocessing techniques for better 2D barcode detection
+    images_to_scan = [
+        gray,  # Original grayscale
+        cv2.GaussianBlur(gray, (3, 3), 0),  # Slight blur
+        cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2),  # Adaptive threshold
+        cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],  # Otsu's threshold
+    ]
+    
+    # Convert to PIL for DataMatrix scanning
+    pil_image = Image.fromarray(cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB))
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        # Scan with pyzbar on multiple preprocessed images
+        pyzbar_futures = [executor.submit(process_standard_barcodes, img) for img in images_to_scan]
+        
+        # Scan with pylibdmtx on original PIL image
         matrix_future = executor.submit(process_datamatrix, pil_image)
         
         try:
-            barcode_data.extend(standard_future.result(timeout=2))
-            barcode_data.extend(matrix_future.result(timeout=2))
-        except TimeoutError:
-            if standard_future.done(): barcode_data.extend(standard_future.result())
-            if matrix_future.done(): barcode_data.extend(matrix_future.result())
+            # Collect all results
+            seen_data = set()
+            for future in pyzbar_futures:
+                try:
+                    results = future.result(timeout=2)
+                    for barcode in results:
+                        # Avoid duplicates
+                        key = (barcode['data'], barcode['type'])
+                        if key not in seen_data:
+                            seen_data.add(key)
+                            barcode_data.append(barcode)
+                except TimeoutError:
+                    pass
+            
+            # Add DataMatrix results
+            try:
+                dm_results = matrix_future.result(timeout=3)
+                for barcode in dm_results:
+                    key = (barcode['data'], barcode['type'])
+                    if key not in seen_data:
+                        seen_data.add(key)
+                        barcode_data.append(barcode)
+            except TimeoutError:
+                pass
+                
+        except Exception as e:
+            print(f"Error during barcode scanning: {e}")
     
     return barcode_data
 
 def process_standard_barcodes(gray):
     try:
-        barcodes = pyzbar.decode(gray)
+        # pyzbar can detect QR codes and other 1D/2D barcodes
+        barcodes = pyzbar.decode(gray, symbols=[
+            pyzbar.ZBarSymbol.QRCODE,
+            pyzbar.ZBarSymbol.CODE128,
+            pyzbar.ZBarSymbol.CODE39,
+            pyzbar.ZBarSymbol.EAN13,
+            pyzbar.ZBarSymbol.EAN8,
+            pyzbar.ZBarSymbol.UPCA,
+            pyzbar.ZBarSymbol.UPCE,
+            pyzbar.ZBarSymbol.I25,
+            pyzbar.ZBarSymbol.DATABAR,
+            pyzbar.ZBarSymbol.DATABAR_EXP,
+        ])
         return [{
             'data': barcode.data.decode('utf-8'),
             'type': barcode.type,
             'location': {'x': barcode.rect[0], 'y': barcode.rect[1], 'width': barcode.rect[2], 'height': barcode.rect[3]}
         } for barcode in barcodes]
-    except Exception: return []
+    except Exception as e:
+        print(f"Error in process_standard_barcodes: {e}")
+        return []
 
 def process_datamatrix(pil_image):
     try:
-        dmtx_results = pylibdmtx.decode(pil_image, timeout=1000)
-        return [{
-            'data': code.data.decode('utf-8'),
-            'type': 'DataMatrix',
-            'location': {'x': code.rect[0], 'y': code.rect[1], 'width': code.rect[2], 'height': code.rect[3]}
-        } for code in dmtx_results]
-    except Exception: return []
+        # Increase timeout and try with different parameters
+        dmtx_results = pylibdmtx.decode(pil_image, timeout=2000, max_count=10)
+        results = []
+        for code in dmtx_results:
+            try:
+                results.append({
+                    'data': code.data.decode('utf-8'),
+                    'type': 'DataMatrix',
+                    'location': {'x': code.rect.left, 'y': code.rect.top, 'width': code.rect.width, 'height': code.rect.height}
+                })
+            except Exception as e:
+                print(f"Error decoding DataMatrix result: {e}")
+        return results
+    except Exception as e:
+        print(f"Error in process_datamatrix: {e}")
+        return []
 
 @app.route('/read-barcodes', methods=['POST'])
 def read_barcodes():
