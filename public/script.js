@@ -4,15 +4,15 @@ let zebraFile = null;
 let generatedLabels = [];
 let currentLabelIndex = 0;
 
-const dataMatrixPrefixOrder = ["1J", "P", "Q", "V", "1T"];
+const barcodePrefixOrder = ["1J", "P", "Q", "V", "1T"];
 
-function getDataMatrixRecordPrefix(record) {
+function getBarcodeRecordPrefix(record) {
   return ["1J", "1T", "P", "Q", "V"].find((prefix) =>
     record.startsWith(prefix),
   );
 }
 
-function rearrangeDataMatrixFieldData(data) {
+function rearrangeBarcodeFieldData(data) {
   const parts = data.split(/(\\?\*\/)/);
   if (parts.length < 3) return data;
 
@@ -25,15 +25,15 @@ function rearrangeDataMatrixFieldData(data) {
 
   const recordsByPrefix = new Map();
   for (let index = 2; index < parts.length; index += 2) {
-    const prefix = getDataMatrixRecordPrefix(parts[index]);
+    const prefix = getBarcodeRecordPrefix(parts[index]);
     if (!prefix) continue;
     if (recordsByPrefix.has(prefix)) return data;
     recordsByPrefix.set(prefix, { index, record: parts[index] });
   }
 
   if (
-    recordsByPrefix.size !== dataMatrixPrefixOrder.length ||
-    !dataMatrixPrefixOrder.every((prefix) => recordsByPrefix.has(prefix))
+    recordsByPrefix.size !== barcodePrefixOrder.length ||
+    !barcodePrefixOrder.every((prefix) => recordsByPrefix.has(prefix))
   ) {
     return data;
   }
@@ -41,7 +41,7 @@ function rearrangeDataMatrixFieldData(data) {
   const targetIndexes = [...recordsByPrefix.values()]
     .map(({ index }) => index)
     .sort((left, right) => left - right);
-  dataMatrixPrefixOrder.forEach((prefix, position) => {
+  barcodePrefixOrder.forEach((prefix, position) => {
     parts[targetIndexes[position]] = recordsByPrefix.get(prefix).record;
   });
 
@@ -49,12 +49,38 @@ function rearrangeDataMatrixFieldData(data) {
   return parts.join("");
 }
 
-function rearrangeDataMatrixFields(zpl) {
+function rearrangeBarcodeFields(zpl) {
+  const barcodeCounts = { Q: 0, X: 0 };
   return zpl.replace(
-    /(\^BX[^^]*\^FD)(.*?)(\^FS)/gis,
-    (_, command, data, end) =>
-      `${command}${rearrangeDataMatrixFieldData(data)}${end}`,
+    /(\^B([QX])[^^]*\^FD)(.*?)(\^FS)/gis,
+    (_, command, barcodeCommand, data, end) => {
+      const barcodeKey = barcodeCommand.toUpperCase();
+      const barcodeType = barcodeKey === "Q" ? "QR Code" : "Data Matrix";
+      barcodeCounts[barcodeKey] += 1;
+      const rearrangedData = rearrangeBarcodeFieldData(data);
+      if (rearrangedData !== data) {
+        console.log(
+          `${barcodeType} ${barcodeCounts[barcodeKey]} new contents:`,
+          rearrangedData,
+        );
+      }
+      return `${command}${rearrangedData}${end}`;
+    },
   );
+}
+
+function logBarcodeContents(zpl, labelNumber) {
+  const barcodeCounts = { Q: 0, X: 0 };
+  zpl.replace(/\^B([QX])[^^]*\^FD(.*?)\^FS/gis, (_, barcodeCommand, data) => {
+    const barcodeKey = barcodeCommand.toUpperCase();
+    const barcodeType = barcodeKey === "Q" ? "QR Code" : "Data Matrix";
+    barcodeCounts[barcodeKey] += 1;
+    console.log(
+      `Uploaded label ${labelNumber}, ${barcodeType} ${barcodeCounts[barcodeKey]} new contents:`,
+      data,
+    );
+    return _;
+  });
 }
 
 function switchTab(tabName) {
@@ -178,7 +204,7 @@ async function readFileBarcodesButton() {
 
 async function generateLabel() {
   const zplElement = document.getElementById("zplInput");
-  const zplInput = rearrangeDataMatrixFields(zplElement.value);
+  const zplInput = rearrangeBarcodeFields(zplElement.value);
   zplElement.value = zplInput;
   const labelImage = document.getElementById("labelImage");
   const errorMessage = document.getElementById("errorMessage");
@@ -226,7 +252,7 @@ async function generateLabel() {
 
 async function readBarcodes() {
   const zplElement = document.getElementById("zplInput");
-  const zplInput = rearrangeDataMatrixFields(zplElement.value);
+  const zplInput = rearrangeBarcodeFields(zplElement.value);
   zplElement.value = zplInput;
   const barcodeResults = document.getElementById("barcodeResults");
   const barcodeList = document.getElementById("barcodeList");
@@ -377,6 +403,10 @@ async function generateLabelsFromPdf() {
     // Store generated labels
     generatedLabels = data.labels;
     currentLabelIndex = 0;
+
+    generatedLabels.forEach((label, index) => {
+      logBarcodeContents(label.zpl, index + 1);
+    });
 
     // Display first label
     displayCurrentLabel();

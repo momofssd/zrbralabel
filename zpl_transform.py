@@ -1,15 +1,15 @@
-"""Utilities for normalizing Data Matrix records embedded in ZPL."""
+"""Utilities for normalizing QR Code and Data Matrix records in ZPL."""
 
 import re
 
 
-DATA_MATRIX_PREFIX_ORDER = ("1J", "P", "Q", "V", "1T")
+BARCODE_PREFIX_ORDER = ("1J", "P", "Q", "V", "1T")
 
-# A Zebra Data Matrix field starts with ^BX, places its value after ^FD, and
-# finishes at ^FS.  Restricting the command portion to non-caret characters
-# keeps the match inside the current ZPL command.
-_DATA_MATRIX_FIELD = re.compile(
-    r"(?P<command>\^BX[^^]*\^FD)(?P<data>.*?)(?P<end>\^FS)",
+# Zebra QR Code and Data Matrix fields start with ^BQ and ^BX respectively,
+# place their values after ^FD, and finish at ^FS. Restricting the command
+# portion to non-caret characters keeps the match inside the current command.
+_TWO_DIMENSIONAL_BARCODE_FIELD = re.compile(
+    r"(?P<command>\^B[QX][^^]*\^FD)(?P<data>.*?)(?P<end>\^FS)",
     re.IGNORECASE | re.DOTALL,
 )
 _RECORD_DELIMITER = re.compile(r"(\\?\*/)")
@@ -26,7 +26,7 @@ def _record_prefix(record: str) -> str | None:
 
 
 def _rearrange_field_data(data: str) -> str:
-    """Reorder one Data Matrix field while preserving payload text exactly."""
+    """Reorder one barcode field while preserving payload text exactly."""
     parts = _RECORD_DELIMITER.split(data)
     if len(parts) < 3:
         return data
@@ -53,11 +53,11 @@ def _rearrange_field_data(data: str) -> str:
 
     # Only rewrite complete messages matching the requested five-record
     # schema. Partial or unrelated Data Matrix values remain unchanged.
-    if set(records_by_prefix) != set(DATA_MATRIX_PREFIX_ORDER):
+    if set(records_by_prefix) != set(BARCODE_PREFIX_ORDER):
         return data
 
     target_indexes = sorted(index for index, _ in records_by_prefix.values())
-    ordered_records = [records_by_prefix[prefix][1] for prefix in DATA_MATRIX_PREFIX_ORDER]
+    ordered_records = [records_by_prefix[prefix][1] for prefix in BARCODE_PREFIX_ORDER]
     for index, record in zip(target_indexes, ordered_records):
         parts[index] = record
 
@@ -65,8 +65,8 @@ def _rearrange_field_data(data: str) -> str:
     return "".join(parts)
 
 
-def rearrange_datamatrix_fields(zpl: str) -> str:
-    """Reorder every matching ^BX field in ZPL to 1J, P, Q, V, 1T."""
+def rearrange_barcode_fields(zpl: str) -> str:
+    """Reorder every ^BQ and ^BX field in ZPL to 1J, P, Q, V, 1T."""
     if not isinstance(zpl, str):
         return zpl
 
@@ -79,4 +79,8 @@ def rearrange_datamatrix_fields(zpl: str) -> str:
             )
         )
 
-    return _DATA_MATRIX_FIELD.sub(replace_field, zpl)
+    return _TWO_DIMENSIONAL_BARCODE_FIELD.sub(replace_field, zpl)
+
+
+# Preserve the original public name for callers that imported it previously.
+rearrange_datamatrix_fields = rearrange_barcode_fields

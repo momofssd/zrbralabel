@@ -20,7 +20,7 @@ from requests.adapters import HTTPAdapter
 import time
 import threading
 
-from zpl_transform import rearrange_datamatrix_fields
+from zpl_transform import rearrange_barcode_fields
 
 
 # --- Configuration & Persistent Cache Setup ---
@@ -73,8 +73,8 @@ def generate_label():
     if not zpl:
         return jsonify({'error': 'ZPL code is required'}), 400
 
-    # Normalize every Data Matrix field before hashing or calling Labelary.
-    zpl = rearrange_datamatrix_fields(zpl)
+    # Normalize every QR Code and Data Matrix field before hashing or Labelary.
+    zpl = rearrange_barcode_fields(zpl)
 
     zpl_hash = get_zpl_hash(zpl)
     
@@ -215,7 +215,7 @@ def read_barcodes():
         if not zpl:
             return jsonify({'error': 'ZPL code is required'}), 400
 
-        zpl = rearrange_datamatrix_fields(zpl)
+        zpl = rearrange_barcode_fields(zpl)
 
         zpl_hash = get_zpl_hash(zpl)
         label_content = get_cached_label(zpl_hash)
@@ -281,7 +281,7 @@ def extract_zpl_from_pdf():
         for page_num, page in enumerate(pdf_reader.pages):
             text = page.extract_text()
             if '^XA' in text.upper():
-                zpl_code = rearrange_datamatrix_fields(text.strip())
+                zpl_code = rearrange_barcode_fields(text.strip())
                 zpl_hash = get_zpl_hash(zpl_code)
                 img_data = get_cached_label(zpl_hash)
                 
