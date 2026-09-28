@@ -4,6 +4,59 @@ let zebraFile = null;
 let generatedLabels = [];
 let currentLabelIndex = 0;
 
+const dataMatrixPrefixOrder = ["1J", "P", "Q", "V", "1T"];
+
+function getDataMatrixRecordPrefix(record) {
+  return ["1J", "1T", "P", "Q", "V"].find((prefix) =>
+    record.startsWith(prefix),
+  );
+}
+
+function rearrangeDataMatrixFieldData(data) {
+  const parts = data.split(/(\\?\*\/)/);
+  if (parts.length < 3) return data;
+
+  let trailer = "";
+  const trailerMatch = parts.at(-1).match(/(\\?\*<\\?\*[\r\n]*)$/);
+  if (trailerMatch) {
+    trailer = trailerMatch[1];
+    parts[parts.length - 1] = parts.at(-1).slice(0, -trailer.length);
+  }
+
+  const recordsByPrefix = new Map();
+  for (let index = 2; index < parts.length; index += 2) {
+    const prefix = getDataMatrixRecordPrefix(parts[index]);
+    if (!prefix) continue;
+    if (recordsByPrefix.has(prefix)) return data;
+    recordsByPrefix.set(prefix, { index, record: parts[index] });
+  }
+
+  if (
+    recordsByPrefix.size !== dataMatrixPrefixOrder.length ||
+    !dataMatrixPrefixOrder.every((prefix) => recordsByPrefix.has(prefix))
+  ) {
+    return data;
+  }
+
+  const targetIndexes = [...recordsByPrefix.values()]
+    .map(({ index }) => index)
+    .sort((left, right) => left - right);
+  dataMatrixPrefixOrder.forEach((prefix, position) => {
+    parts[targetIndexes[position]] = recordsByPrefix.get(prefix).record;
+  });
+
+  parts[parts.length - 1] += trailer;
+  return parts.join("");
+}
+
+function rearrangeDataMatrixFields(zpl) {
+  return zpl.replace(
+    /(\^BX[^^]*\^FD)(.*?)(\^FS)/gis,
+    (_, command, data, end) =>
+      `${command}${rearrangeDataMatrixFieldData(data)}${end}`,
+  );
+}
+
 function switchTab(tabName) {
   // Update tab buttons
   document.querySelectorAll(".tab-button").forEach((button) => {
@@ -124,7 +177,9 @@ async function readFileBarcodesButton() {
 }
 
 async function generateLabel() {
-  const zplInput = document.getElementById("zplInput").value;
+  const zplElement = document.getElementById("zplInput");
+  const zplInput = rearrangeDataMatrixFields(zplElement.value);
+  zplElement.value = zplInput;
   const labelImage = document.getElementById("labelImage");
   const errorMessage = document.getElementById("errorMessage");
   const downloadButton = document.getElementById("downloadButton");
@@ -170,7 +225,9 @@ async function generateLabel() {
 }
 
 async function readBarcodes() {
-  const zplInput = document.getElementById("zplInput").value;
+  const zplElement = document.getElementById("zplInput");
+  const zplInput = rearrangeDataMatrixFields(zplElement.value);
+  zplElement.value = zplInput;
   const barcodeResults = document.getElementById("barcodeResults");
   const barcodeList = document.getElementById("barcodeList");
   const barcodeError = document.getElementById("barcodeError");
