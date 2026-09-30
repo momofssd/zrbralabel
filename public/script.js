@@ -4,6 +4,47 @@ let zebraFile = null;
 let generatedLabels = [];
 let currentLabelIndex = 0;
 
+async function getResponseError(response) {
+  const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+  const contentType = response.headers.get("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    try {
+      const data = await response.json();
+      return data.error || data.message || status;
+    } catch (_error) {
+      return `${status}: the server returned invalid JSON`;
+    }
+  }
+
+  if (contentType.includes("text/html")) {
+    return `${status}: the server or proxy returned an HTML error page (commonly a request-size limit or timeout)`;
+  }
+
+  try {
+    const text = (await response.text()).trim();
+    if (text) return `${status}: ${text.slice(0, 300)}`;
+  } catch (_error) {
+    // The status is still useful if the response body cannot be read.
+  }
+
+  return status;
+}
+
+async function readJsonResponse(response) {
+  if (!response.ok) {
+    throw new Error(await getResponseError(response));
+  }
+
+  try {
+    return await response.json();
+  } catch (_error) {
+    throw new Error(
+      `HTTP ${response.status}: expected JSON but the server returned a different response`,
+    );
+  }
+}
+
 const barcodePrefixOrder = ["1J", "P", "Q", "V", "1T"];
 
 function getBarcodeRecordPrefix(record) {
@@ -160,11 +201,7 @@ async function readFileBarcodesButton() {
       body: formData,
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || `HTTP error! status: ${response.status}`);
-    }
+    const data = await readJsonResponse(response);
 
     // Display the image if available
     if (data.image) {
@@ -233,10 +270,7 @@ async function generateLabel() {
     });
 
     if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(
-        errorData.error || `HTTP error! status: ${response.status}`,
-      );
+      throw new Error(await getResponseError(response));
     }
 
     const blob = await response.blob();
@@ -275,11 +309,7 @@ async function readBarcodes() {
       body: JSON.stringify({ zpl: zplInput }),
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || `HTTP error! status: ${response.status}`);
-    }
+    const data = await readJsonResponse(response);
 
     // Display results
     if (data.barcodes && data.barcodes.length > 0) {
@@ -390,11 +420,7 @@ async function generateLabelsFromPdf() {
       body: formData,
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || `HTTP error! status: ${response.status}`);
-    }
+    const data = await readJsonResponse(response);
 
     if (!data.labels || data.labels.length === 0) {
       throw new Error("No ZPL codes found in the PDF");
@@ -501,11 +527,7 @@ async function readZebraBarcodes() {
       body: JSON.stringify({ image: currentLabel.image }),
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || `HTTP error! status: ${response.status}`);
-    }
+    const data = await readJsonResponse(response);
 
     // Display results
     if (data.barcodes && data.barcodes.length > 0) {
@@ -551,17 +573,22 @@ async function downloadAllLabels() {
   downloadButton.textContent = "Generating PDF...";
 
   try {
+    // The images are already in the server cache. Sending only their IDs keeps
+    // this request small and avoids reverse-proxy body-size/time limits.
+    const pdfLabels = generatedLabels.map((label) =>
+      label.cache_id ? { cache_id: label.cache_id } : { image: label.image },
+    );
+
     const response = await fetch("/generate-pdf-from-labels", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ labels: generatedLabels }),
+      body: JSON.stringify({ labels: pdfLabels }),
     });
 
     if (!response.ok) {
-      const data = await response.json();
-      throw new Error(data.error || `HTTP error! status: ${response.status}`);
+      throw new Error(await getResponseError(response));
     }
 
     const blob = await response.blob();
@@ -607,11 +634,7 @@ async function resetCache() {
       },
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || `HTTP error! status: ${response.status}`);
-    }
+    const data = await readJsonResponse(response);
 
     // Show success message
     errorMessage.textContent = "";

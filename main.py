@@ -15,6 +15,7 @@ import os
 import tempfile
 import base64
 import hashlib
+import re
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import time
@@ -25,6 +26,9 @@ from zpl_transform import rearrange_barcode_fields
 
 # --- Configuration & Persistent Cache Setup ---
 CACHE_DIR = "label_storage_cache"
+LABELARY_URL = 'https://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/'
+# Never let an unavailable rendering service hold a web request open forever.
+LABELARY_TIMEOUT = (3.05, 15)
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
@@ -86,10 +90,10 @@ def generate_label():
     try:
         headers = {'Accept': 'image/png'}
         response = session.post(
-            'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
+            LABELARY_URL,
             data=zpl,
             headers=headers,
-            timeout=10
+            timeout=LABELARY_TIMEOUT
         )
 
         if response.status_code == 200:
@@ -222,8 +226,8 @@ def read_barcodes():
 
         if not label_content:
             response = session.post(
-                'http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/',
-                data=zpl, headers={'Accept': 'image/png'}, timeout=10
+                LABELARY_URL,
+                data=zpl, headers={'Accept': 'image/png'}, timeout=LABELARY_TIMEOUT
             )
             if response.status_code != 200:
                 return jsonify({'error': 'Error generating label'}), response.status_code
@@ -286,14 +290,23 @@ def extract_zpl_from_pdf():
                 img_data = get_cached_label(zpl_hash)
                 
                 if not img_data:
-                    resp = session.post('http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/', 
-                                      data=zpl_code, headers={'Accept': 'image/png'})
+                    resp = session.post(
+                        LABELARY_URL,
+                        data=zpl_code,
+                        headers={'Accept': 'image/png'},
+                        timeout=LABELARY_TIMEOUT,
+                    )
                     if resp.status_code == 200:
                         img_data = resp.content
                         save_to_cache(zpl_hash, img_data)
                 
                 if img_data:
-                    labels.append({'page': page_num + 1, 'zpl': zpl_code, 'image': base64.b64encode(img_data).decode('utf-8')})
+                    labels.append({
+                        'page': page_num + 1,
+                        'zpl': zpl_code,
+                        'cache_id': zpl_hash,
+                        'image': base64.b64encode(img_data).decode('utf-8'),
+                    })
         
         return jsonify({'labels': labels})
     except Exception as e: return jsonify({'error': str(e)}), 500
@@ -309,10 +322,18 @@ def read_barcodes_from_image():
 
 @app.route('/generate-pdf-from-labels', methods=['POST'])
 def generate_pdf_from_labels():
+    started_at = time.monotonic()
     try:
-        labels = request.json.get('labels', [])
+        data = request.get_json(silent=True) or {}
+        labels = data.get('labels', [])
         if not labels:
             return jsonify({'error': 'No labels provided'}), 400
+
+        app.logger.info(
+            'Generating PDF for %d labels (request size: %s bytes)',
+            len(labels),
+            request.content_length,
+        )
 
         from reportlab.pdfgen import canvas
         from reportlab.lib.utils import ImageReader
@@ -321,50 +342,78 @@ def generate_pdf_from_labels():
         LABEL_WIDTH = 4 * 72   # 288 points
         LABEL_HEIGHT = 6 * 72  # 432 points
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-            pdf_path = tmp_file.name
-            # Create the canvas with the specific 4x6 page size
-            c = canvas.Canvas(pdf_path, pagesize=(LABEL_WIDTH, LABEL_HEIGHT))
-            
-            for label in labels:
-                img_data = base64.b64decode(label['image'])
-                img_io = io.BytesIO(img_data)
-                img_reader = ImageReader(img_io)
-                
-                # Get original image dimensions
-                orig_w, orig_h = img_reader.getSize()
-                aspect = orig_h / float(orig_w)
-                
-                # Calculate scaling to fit 4x6 while maintaining aspect ratio
-                # We leave a tiny margin (e.g., 4 points) to prevent clipping
-                margin = 4
-                printable_w = LABEL_WIDTH - (margin * 2)
-                printable_h = LABEL_HEIGHT - (margin * 2)
-                
-                draw_w = printable_w
-                draw_h = draw_w * aspect
-                
-                # If the height exceeds the page, scale down based on height instead
-                if draw_h > printable_h:
-                    draw_h = printable_h
-                    draw_w = draw_h / aspect
-                
-                # Center the image on the 4x6 page
-                x_centered = (LABEL_WIDTH - draw_w) / 2
-                y_centered = (LABEL_HEIGHT - draw_h) / 2
-                
-                c.drawImage(img_reader, x_centered, y_centered, width=draw_w, height=draw_h)
-                c.showPage()
-                
-            c.save()
+        pdf_buffer = io.BytesIO()
+        c = canvas.Canvas(pdf_buffer, pagesize=(LABEL_WIDTH, LABEL_HEIGHT))
+
+        for index, label in enumerate(labels, start=1):
+            if not isinstance(label, dict):
+                return jsonify({'error': f'Label {index} is invalid'}), 400
+
+            img_data = None
+            cache_id = label.get('cache_id')
+            if cache_id:
+                if not isinstance(cache_id, str) or not re.fullmatch(r'[0-9a-f]{32}', cache_id):
+                    return jsonify({'error': f'Label {index} has an invalid cache ID'}), 400
+                img_data = get_cached_label(cache_id)
+                if img_data is None:
+                    return jsonify({
+                        'error': (
+                            f'Label {index} is no longer in the server cache. '
+                            'Generate the labels again, then retry the PDF download.'
+                        )
+                    }), 409
+
+            # Backward compatibility for callers created before cache IDs were added.
+            if img_data is None and label.get('image'):
+                try:
+                    img_data = base64.b64decode(label['image'], validate=True)
+                except (ValueError, TypeError):
+                    return jsonify({'error': f'Label {index} contains invalid image data'}), 400
+
+            if img_data is None:
+                return jsonify({'error': f'Label {index} has no image data'}), 400
+
+            img_reader = ImageReader(io.BytesIO(img_data))
+
+            # Get original image dimensions
+            orig_w, orig_h = img_reader.getSize()
+            aspect = orig_h / float(orig_w)
+
+            # Calculate scaling to fit 4x6 while maintaining aspect ratio.
+            margin = 4
+            printable_w = LABEL_WIDTH - (margin * 2)
+            printable_h = LABEL_HEIGHT - (margin * 2)
+
+            draw_w = printable_w
+            draw_h = draw_w * aspect
+
+            if draw_h > printable_h:
+                draw_h = printable_h
+                draw_w = draw_h / aspect
+
+            x_centered = (LABEL_WIDTH - draw_w) / 2
+            y_centered = (LABEL_HEIGHT - draw_h) / 2
+
+            c.drawImage(img_reader, x_centered, y_centered, width=draw_w, height=draw_h)
+            c.showPage()
+
+        c.save()
+        pdf_buffer.seek(0)
+
+        app.logger.info(
+            'Generated PDF for %d labels in %.2f seconds',
+            len(labels),
+            time.monotonic() - started_at,
+        )
         
         return send_file(
-            pdf_path, 
+            pdf_buffer,
             mimetype='application/pdf', 
             as_attachment=True, 
             download_name='zebra_labels_4x6.pdf'
         )
     except Exception as e:
+        app.logger.exception('PDF generation failed')
         return jsonify({'error': str(e)}), 500
 
 @app.route('/reset-cache', methods=['POST'])
